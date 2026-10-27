@@ -484,6 +484,13 @@ def create_app(
     app.include_router(analytics_router)
     include_all_routes(app)
 
+    # Pre-warm Argon Maestro (agy) session in background for instant voice turns
+    try:
+        from openjarvis.engine.argon_bridge import prewarm_argon_async
+        prewarm_argon_async("gemini-4-argon-low")
+    except Exception:
+        pass
+
     # Restore SendBlue channel bindings from database on startup
     _restore_sendblue_bindings(app)
 

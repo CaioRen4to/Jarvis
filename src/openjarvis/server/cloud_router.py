@@ -46,11 +46,20 @@ def _load_keys() -> dict[str, str]:
     keys: dict[str, str] = {}
     # File first, then fall back to process environment
     if _CLOUD_ENV_FILE.exists():
-        for raw in _CLOUD_ENV_FILE.read_text().splitlines():
+        for raw in _CLOUD_ENV_FILE.read_text(encoding="utf-8", errors="ignore").splitlines():
             line = raw.strip()
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 keys[k.strip()] = v.strip()
+    # Fallback to Desktop GEMINI_API_KEY.txt if present
+    if "GEMINI_API_KEY" not in keys:
+        desktop_key = Path.home() / "OneDrive" / "Área de Trabalho" / "GEMINI_API_KEY.txt"
+        if desktop_key.is_file():
+            raw_k = desktop_key.read_text(encoding="utf-8", errors="ignore").strip()
+            val = raw_k.split(":", 1)[1].strip() if ":" in raw_k else raw_k
+            if val:
+                keys["GEMINI_API_KEY"] = val
+                keys["GOOGLE_API_KEY"] = val
     # Process env can override (e.g. during testing)
     for name in (
         "OPENAI_API_KEY",

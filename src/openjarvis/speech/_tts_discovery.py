@@ -15,14 +15,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Priority order: local first, then cloud.
-TTS_BACKEND_ORDER = ("kokoro", "openai_tts", "cartesia", "elevenlabs")
+# Priority order: Edge-TTS Neural (PT-BR Antonio / free & zero VRAM), then Kokoro local, then cloud.
+TTS_BACKEND_ORDER = ("edge_tts", "kokoro", "openai_tts", "cartesia", "elevenlabs")
 
 # Voice IDs are backend-specific and NOT portable. ``speech.voice_id`` applies
 # only to ``speech.tts_backend``; if synthesis falls back to another backend we
 # use that backend's own default rather than passing an unrecognized ID through.
 BACKEND_DEFAULT_VOICE = {
-    "kokoro": "bm_george",  # British male
+    "edge_tts": "pt-BR-AntonioNeural",  # Brazilian Portuguese Male (J.A.R.V.I.S. style)
+    "kokoro": "pm_alex",  # Brazilian Portuguese Male (Kokoro local)
     "openai_tts": "onyx",  # deepest OpenAI preset
     "cartesia": "",  # no safe static default; let Cartesia choose
     "elevenlabs": "JBFqnCBsd6RMkjVDRZzb",  # "George", British male
@@ -71,9 +72,9 @@ def voice_preferences(config: "JarvisConfig") -> tuple[str, str, float]:
     """Resolve ``(tts_backend, voice_id, speed)`` from *config*."""
     speech = getattr(config, "speech", None)
     return (
-        getattr(speech, "tts_backend", "kokoro") or "kokoro",
-        getattr(speech, "voice_id", "") or "",
-        float(getattr(speech, "voice_speed", 1.0)),
+        getattr(speech, "tts_backend", "edge_tts") or "edge_tts",
+        getattr(speech, "voice_id", "") or "pt-BR-AntonioNeural",
+        float(getattr(speech, "voice_speed", 1.05)),
     )
 
 

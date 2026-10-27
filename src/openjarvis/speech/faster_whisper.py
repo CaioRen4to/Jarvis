@@ -120,8 +120,26 @@ class FasterWhisperBackend(SpeechBackend):
                 if language:
                     kwargs["language"] = language
 
-                segments_iter, info = model.transcribe(tmp.name, **kwargs)
-                segments_list = list(segments_iter)
+                try:
+                    segments_iter, info = model.transcribe(tmp.name, **kwargs)
+                    segments_list = list(segments_iter)
+                except RuntimeError as cuda_exc:
+                    err_msg = str(cuda_exc).lower()
+                    if self._device != "cpu" and any(
+                        k in err_msg for k in ("cublas", "cudnn", "cuda")
+                    ):
+                        logger.warning(
+                            "CUDA runtime library missing (%s) - falling back to CPU int8 for Faster-Whisper",
+                            cuda_exc,
+                        )
+                        self._device = "cpu"
+                        self._compute_type = "int8"
+                        self._model = None
+                        model = self._ensure_model()
+                        segments_iter, info = model.transcribe(tmp.name, **kwargs)
+                        segments_list = list(segments_iter)
+                    else:
+                        raise
             finally:
                 try:
                     os.unlink(tmp.name)

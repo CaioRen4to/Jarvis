@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { Send, Square, Paperclip, Search } from 'lucide-react';
+import { Send, Square, Search, Mic } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore, generateId } from '../../lib/store';
 import { streamChat, streamResearch } from '../../lib/sse';
@@ -21,10 +21,6 @@ import type {
   ToolCallInfo,
 } from '../../types';
 
-// While Deep Research is toggled on, poll connected sources for sync
-// progress so we can surface "Searching over N items — sync in progress"
-// next to the toggle. Polling is gated on `enabled` so toggling DR off
-// stops the network chatter immediately.
 function useResearchCorpusSync(enabled: boolean): {
   syncing: boolean;
   itemsSynced: number;
@@ -81,6 +77,7 @@ function useResearchCorpusSync(enabled: boolean): {
 
 export function InputArea() {
   const [input, setInput] = useState('');
+  const [autoSendVoice, setAutoSendVoice] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -88,7 +85,6 @@ export function InputArea() {
   const activeId = useAppStore((s) => s.activeId);
   const selectedModel = useAppStore((s) => s.selectedModel);
   const streamState = useAppStore((s) => s.streamState);
-  const messages = useAppStore((s) => s.messages);
   const speechEnabled = useAppStore((s) => s.settings.speechEnabled);
   const maxTokens = useAppStore((s) => s.settings.maxTokens);
   const temperature = useAppStore((s) => s.settings.temperature);
@@ -111,8 +107,11 @@ export function InputArea() {
     stopRecording,
   } = useSpeech();
 
-  // Abort in-flight stream when the user switches models mid-generation.
-  // This prevents errors from trying to continue a stream with a stale model.
+  // Broadcast speechState to JarvisVoiceHud
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('jarvis-mic-state', { detail: speechState }));
+  }, [speechState]);
+
   const prevModelRef = useRef(selectedModel);
   useEffect(() => {
     if (prevModelRef.current !== selectedModel && streamState.isStreaming) {
@@ -140,28 +139,6 @@ export function InputArea() {
     }
   }, [speechError]);
 
-  const handleMicClick = useCallback(async () => {
-    if (speechState === 'recording') {
-      try {
-        const text = await stopRecording();
-        if (text) {
-          setInput((prev) => (prev ? prev + ' ' + text : text));
-        }
-      } catch {
-        // Error is captured in useSpeech
-      }
-    } else {
-      await startRecording();
-    }
-  }, [speechState, startRecording, stopRecording]);
-
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
-  }, [input]);
-
   const stopStreaming = useCallback(() => {
     abortRef.current?.abort();
     if (timerRef.current) {
@@ -171,11 +148,11 @@ export function InputArea() {
     resetStream();
   }, [resetStream]);
 
-  const sendMessage = useCallback(async () => {
-    const content = input.trim();
+  const sendMessage = useCallback(async (overrideContent?: string) => {
+    const content = (typeof overrideContent === 'string' ? overrideContent : input).trim();
     if (!content || streamState.isStreaming) return;
     if (!selectedModel) {
-      toast.error('Pick a model first (⌘K)');
+      toast.error('Selecione um modelo primeiro (Ctrl+K)');
       return;
     }
 
@@ -194,7 +171,6 @@ export function InputArea() {
     };
     addMessage(convId, userMsg);
 
-    // Build API messages before adding assistant placeholder
     const currentMessages = useAppStore.getState().messages;
     const apiMessages = currentMessages.map((m) => ({
       role: m.role,
@@ -210,7 +186,6 @@ export function InputArea() {
     };
     addMessage(convId, assistantMsg);
 
-    // Start streaming
     const startTime = Date.now();
     const timer = setInterval(() => {
       setStreamState({ elapsedMs: Date.now() - startTime });
@@ -235,7 +210,7 @@ export function InputArea() {
     setStreamState({
       conversationId: convId,
       isStreaming: true,
-      phase: deepResearch ? 'Researching...' : 'Generating...',
+      phase: deepResearch ? 'Pesquisando...' : 'Gerando resposta...',
       elapsedMs: 0,
       activeToolCalls: [],
       content: '',
@@ -325,18 +300,12 @@ export function InputArea() {
               lastFlush = now;
             }
           } else if (ev.type === 'system_metrics') {
-            // Live GPU sample — feed straight to the System panel so Power
-            // (W) and Energy (kJ) tick up in real time as the agent runs.
             useAppStore.getState().setLiveEnergy({
               power_w: ev.power_w,
               energy_j: ev.energy_j,
               duration_s: ev.duration_s,
             });
           } else if (ev.type === 'error') {
-            // Backend setup/worker failure (Ollama down, planner model
-            // missing, KnowledgeStore locked, etc.). Without surfacing the
-            // message, the user sees only the generic "No response was
-            // generated" fallback and has no way to self-diagnose.
             const msg = ev.message || 'Research failed (no detail provided)';
             accumulatedContent = accumulatedContent
               ? `${accumulatedContent}\n\n**Research stopped:** ${msg}`
@@ -359,15 +328,8 @@ export function InputArea() {
                   (ev.usage.prompt_tokens ?? 0) +
                     (ev.usage.completion_tokens ?? 0),
               };
-              // Optimistically roll this research turn into the session
-              // counters so the Session panel updates the moment the
-              // stream finishes, regardless of how /v1/savings aggregates
-              // research telemetry server-side.
               useAppStore.getState().incrementSavings(usage);
             }
-            // Hold the final live numbers visible for a beat so the panel
-            // doesn't flash to 0 between the SSE close and the next
-            // /v1/telemetry/energy poll picking up the persisted record.
             window.setTimeout(() => {
               useAppStore.getState().setLiveEnergy(null);
             }, 1500);
@@ -375,88 +337,87 @@ export function InputArea() {
           }
         }
       } else {
-      for await (const sseEvent of streamChat(
-        { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
-        controller.signal,
-      )) {
-        const eventName = sseEvent.event;
+        for await (const sseEvent of streamChat(
+          { model: selectedModel, messages: apiMessages, stream: true, temperature, max_tokens: maxTokens },
+          controller.signal,
+        )) {
+          const eventName = sseEvent.event;
 
-        if (eventName === 'agent_turn_start') {
-          setStreamState({ phase: 'Agent thinking...' });
-        } else if (eventName === 'inference_start') {
-          setStreamState({ phase: 'Generating...' });
-          useAppStore.getState().addLogEntry({
-            timestamp: Date.now(), level: 'info', category: 'chat',
-            message: `Generating with ${selectedModel}...`,
-          });
-        } else if (eventName === 'tool_call_start') {
-          try {
-            const data = JSON.parse(sseEvent.data);
-            const tc: ToolCallInfo = {
-              id: generateId(),
-              tool: data.tool,
-              arguments: serializeToolCallArguments(data.arguments),
-              status: 'running',
-            };
-            toolCalls.push(tc);
-            setStreamState({
-              phase: `Calling ${data.tool}...`,
-              activeToolCalls: [...toolCalls],
-            });
-            updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+          if (eventName === 'agent_turn_start') {
+            setStreamState({ phase: 'Agente pensando...' });
+          } else if (eventName === 'inference_start') {
+            setStreamState({ phase: 'Gerando resposta...' });
             useAppStore.getState().addLogEntry({
-              timestamp: Date.now(), level: 'info', category: 'tool',
-              message: `Calling ${data.tool}(${serializeToolCallArguments(data.arguments)})`,
+              timestamp: Date.now(), level: 'info', category: 'chat',
+              message: `Generating with ${selectedModel}...`,
             });
-          } catch {}
-        } else if (eventName === 'tool_call_end') {
-          try {
-            const data = JSON.parse(sseEvent.data);
-            const tc = toolCalls.find(
-              (t) => t.tool === data.tool && t.status === 'running',
-            );
-            if (tc) {
-              tc.status = data.success ? 'success' : 'error';
-              tc.latency = data.latency;
-              tc.result = data.result;
-            }
-            setStreamState({
-              phase: 'Generating...',
-              activeToolCalls: [...toolCalls],
-            });
-            updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
-          } catch {}
-        } else {
-          try {
-            const data = JSON.parse(sseEvent.data);
-            const delta = data.choices?.[0]?.delta;
-            if (data.usage) usage = data.usage;
-            if (data.complexity) complexity = data.complexity;
-            routedEngine = engineFromCompletionChunk(data) ?? routedEngine;
-            if (delta?.content) {
-              if (!ttftMs) ttftMs = Date.now() - startTime;
-              accumulatedContent += delta.content;
-              setStreamState({ content: accumulatedContent, phase: '' });
-
-              const now = Date.now();
-              if (now - lastFlush >= 80) {
-                updateLastAssistant(
-                  convId,
-                  accumulatedContent,
-                  toolCalls.length > 0 ? [...toolCalls] : undefined,
-                );
-                lastFlush = now;
+          } else if (eventName === 'tool_call_start') {
+            try {
+              const data = JSON.parse(sseEvent.data);
+              const tc: ToolCallInfo = {
+                id: generateId(),
+                tool: data.tool,
+                arguments: serializeToolCallArguments(data.arguments),
+                status: 'running',
+              };
+              toolCalls.push(tc);
+              setStreamState({
+                phase: `Executando ${data.tool}...`,
+                activeToolCalls: [...toolCalls],
+              });
+              updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+              useAppStore.getState().addLogEntry({
+                timestamp: Date.now(), level: 'info', category: 'tool',
+                message: `Calling ${data.tool}(${serializeToolCallArguments(data.arguments)})`,
+              });
+            } catch {}
+          } else if (eventName === 'tool_call_end') {
+            try {
+              const data = JSON.parse(sseEvent.data);
+              const tc = toolCalls.find(
+                (t) => t.tool === data.tool && t.status === 'running',
+              );
+              if (tc) {
+                tc.status = data.success ? 'success' : 'error';
+                tc.latency = data.latency;
+                tc.result = data.result;
               }
-            }
-            if (data.choices?.[0]?.finish_reason === 'stop') break;
-          } catch {}
+              setStreamState({
+                phase: 'Gerando resposta...',
+                activeToolCalls: [...toolCalls],
+              });
+              updateLastAssistant(convId, accumulatedContent, [...toolCalls]);
+            } catch {}
+          } else {
+            try {
+              const data = JSON.parse(sseEvent.data);
+              const delta = data.choices?.[0]?.delta;
+              if (data.usage) usage = data.usage;
+              if (data.complexity) complexity = data.complexity;
+              routedEngine = engineFromCompletionChunk(data) ?? routedEngine;
+              if (delta?.content) {
+                if (!ttftMs) ttftMs = Date.now() - startTime;
+                accumulatedContent += delta.content;
+                setStreamState({ content: accumulatedContent, phase: '' });
+
+                const now = Date.now();
+                if (now - lastFlush >= 80) {
+                  updateLastAssistant(
+                    convId,
+                    accumulatedContent,
+                    toolCalls.length > 0 ? [...toolCalls] : undefined,
+                  );
+                  lastFlush = now;
+                }
+              }
+              if (data.choices?.[0]?.finish_reason === 'stop') break;
+            } catch {}
+          }
         }
-      }
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
-        // User cancelled or model switch — keep whatever was accumulated
-        if (!accumulatedContent) accumulatedContent = '(Generation stopped)';
+        if (!accumulatedContent) accumulatedContent = '(Geração interrompida)';
       } else {
         const errMsg = err?.message || String(err);
         accumulatedContent =
@@ -466,12 +427,10 @@ export function InputArea() {
           message: `Stream error: ${errMsg}`,
         });
       }
-      // If we tore out mid-research, make sure the live System panel
-      // numbers don't get stuck on the last sample.
       useAppStore.getState().setLiveEnergy(null);
     } finally {
       if (!accumulatedContent) {
-        accumulatedContent = 'No response was generated. Please try again.';
+        accumulatedContent = 'Nenhuma resposta foi gerada. Por favor, tente novamente.';
       }
       const totalMs = Date.now() - startTime;
       const appState = useAppStore.getState();
@@ -494,7 +453,6 @@ export function InputArea() {
         complexity_tier: complexity?.tier,
         suggested_max_tokens: complexity?.suggested_max_tokens,
       };
-      // Check if the response has digest audio available
       let audioMeta: { url: string } | undefined;
       try {
         const digestRes = await fetch(`${getBase()}/api/digest`);
@@ -529,10 +487,6 @@ export function InputArea() {
       });
       abortRef.current = null;
 
-      // Research path updates session counters optimistically from the
-      // `done` event's usage payload — re-fetching here would overwrite
-      // it with a potentially stale snapshot if the server's research
-      // telemetry hasn't been merged into /v1/savings yet.
       if (!deepResearch) {
         fetchSavings()
           .then((data) => useAppStore.getState().setSavings(data))
@@ -554,17 +508,74 @@ export function InputArea() {
     maxTokens,
   ]);
 
+  const handleMicClick = useCallback(async () => {
+    if (!speechEnabled) {
+      useAppStore.getState().updateSettings({
+        speechEnabled: true,
+        voiceOutputEnabled: true,
+        voiceAutoplay: true,
+      });
+    }
+    if (speechState === 'recording') {
+      try {
+        const text = await stopRecording();
+        if (text && text.trim()) {
+          if (autoSendVoice) {
+            await sendMessage(text.trim());
+          } else {
+            setInput((prev) => (prev ? prev + ' ' + text : text));
+          }
+        }
+      } catch {
+        // Error is captured in useSpeech
+      }
+    } else {
+      await startRecording();
+    }
+  }, [speechEnabled, speechState, startRecording, stopRecording, autoSendVoice, sendMessage]);
+
+  // Listen to JarvisVoiceHud Orb clicks & Quick Action prompts
+  useEffect(() => {
+    const onToggle = () => {
+      void handleMicClick();
+    };
+    const onSendPrompt = (e: Event) => {
+      const promptText = (e as CustomEvent<string>).detail;
+      if (promptText && typeof promptText === 'string') {
+        void sendMessage(promptText);
+      }
+    };
+    const onStopStream = () => {
+      stopStreaming();
+    };
+    window.addEventListener('jarvis-toggle-mic', onToggle);
+    window.addEventListener('jarvis-send-prompt', onSendPrompt);
+    window.addEventListener('jarvis-stop-stream', onStopStream);
+    return () => {
+      window.removeEventListener('jarvis-toggle-mic', onToggle);
+      window.removeEventListener('jarvis-send-prompt', onSendPrompt);
+      window.removeEventListener('jarvis-stop-stream', onStopStream);
+    };
+  }, [handleMicClick, sendMessage, stopStreaming]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 200) + 'px';
+  }, [input]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      void sendMessage();
     }
   };
 
   return (
     <div className="px-4 pb-4 pt-2" style={{ maxWidth: 'var(--chat-max-width)', margin: '0 auto', width: '100%' }}>
       <div className="mb-2 flex flex-col gap-1">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           <button
             type="button"
             onClick={() => setDeepResearch(!deepResearch)}
@@ -580,6 +591,22 @@ export function InputArea() {
           >
             <Search size={12} />
             Deep Research
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setAutoSendVoice(!autoSendVoice)}
+            aria-pressed={autoSendVoice}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs transition-colors cursor-pointer"
+            style={{
+              background: autoSendVoice ? 'rgba(0, 229, 255, 0.12)' : 'transparent',
+              border: `1px solid ${autoSendVoice ? '#00e5ff' : 'var(--color-border)'}`,
+              color: autoSendVoice ? '#00e5ff' : 'var(--color-text-tertiary)',
+            }}
+            title="Enviar automaticamente assim que você terminar de falar no microfone"
+          >
+            <Mic size={12} />
+            Auto-Enviar Voz: {autoSendVoice ? 'ON' : 'OFF'}
           </button>
         </div>
         {deepResearch && corpusSync.syncing && corpusSync.itemsSynced > 0 && (
@@ -608,7 +635,7 @@ export function InputArea() {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={selectedModel ? 'Message OpenJarvis...' : 'Pick a model first (⌘K)...'}
+          placeholder={selectedModel ? 'Fale pelo microfone ou digite um comando para o Jarvis...' : 'Selecione um modelo primeiro (Ctrl+K)...'}
           rows={1}
           className="flex-1 bg-transparent outline-none resize-none text-sm leading-relaxed"
           style={{ color: 'var(--color-text)', maxHeight: '200px' }}
@@ -619,7 +646,7 @@ export function InputArea() {
             onClick={stopStreaming}
             className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer"
             style={{ background: 'var(--color-error)', color: 'var(--color-on-accent)' }}
-            title="Stop generating"
+            title="Parar geração"
           >
             <Square size={16} />
           </button>
@@ -632,9 +659,9 @@ export function InputArea() {
               reason={micReason}
             />
             <button
-              onClick={sendMessage}
+              onClick={() => void sendMessage()}
               disabled={streamState.isStreaming || !input.trim() || modelLoading || !selectedModel}
-              title={selectedModel ? 'Send message' : 'Pick a model first (⌘K)'}
+              title={selectedModel ? 'Enviar mensagem' : 'Selecione um modelo primeiro (Ctrl+K)'}
               className="p-2 rounded-xl transition-colors shrink-0 cursor-pointer disabled:opacity-30 disabled:cursor-default"
               style={{
                 background: input.trim() ? 'var(--color-accent)' : 'var(--color-bg-tertiary)',
@@ -648,8 +675,9 @@ export function InputArea() {
       </div>
       <div className="flex items-center justify-center mt-2 text-[11px]" style={{ color: 'var(--color-text-tertiary)' }}>
         <span>
-          <kbd className="font-mono">Enter</kbd> to send &middot;{' '}
-          <kbd className="font-mono">Shift+Enter</kbd> for new line
+          <kbd className="font-mono">Enter</kbd> para enviar &middot;{' '}
+          <kbd className="font-mono">Shift+Enter</kbd> nova linha &middot;{' '}
+          Clique no <strong style={{ color: '#00e5ff' }}>Núcleo J.A.R.V.I.S.</strong> para conversar por voz
         </span>
       </div>
     </div>

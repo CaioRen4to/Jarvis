@@ -1,0 +1,12 @@
+{
+  "name": "jarvis-stark-hub-electron",
+  "version": "1.0.0",
+  "description": "J.A.R.V.I.S. & Maestro Desktop HUB Nativos para Windows (Senhor Caio Renato)",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "electron": "^35.0.0"
+  }
+}

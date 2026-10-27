@@ -161,9 +161,11 @@ async def chat_completions(request_body: ChatCompletionRequest, request: Request
     engine = request.app.state.engine
     agent = getattr(request.app.state, "agent", None)
     model = request_body.model
+    from openjarvis.server.cloud_router import is_cloud_model as _is_cloud_m
     use_server_agent = (
         agent is not None
         and not request_body.tools
+        and not (request_body.stream and _is_cloud_m(model))
         and (not request_body.stream or bool(getattr(agent, "_tools", None)))
     )
 
@@ -1119,13 +1121,21 @@ async def list_models(request: Request) -> ModelListResponse:
     # Fall back to direct Ollama query only when the engine returns nothing.
     engine = request.app.state.engine
     all_ids = await asyncio.to_thread(engine.list_models)
-    model_ids = [
+    featured_cloud = [
+        "gemini-3.5-flash",
+        "gemini-3.8-flash",
+        "gemini-4-argon-low",
+        "gemini-4-argon-medium",
+        "gemini-4-argon-high",
+    ]
+    local_ids = [
         m
         for m in all_ids
         if not is_cloud_model(m) or _engine_key_for_model(engine, m) == "litellm"
     ]
-    if not model_ids:
-        model_ids = await list_local_models()
+    if not local_ids:
+        local_ids = await list_local_models()
+    model_ids = featured_cloud + [m for m in local_ids if m not in featured_cloud]
 
     # Keep embed-only models out of the chat model picker. They still work for
     # memory/retrieval via the embedder path; putting them in /v1/models made

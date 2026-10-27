@@ -100,13 +100,18 @@ _ANTHROPIC_FIXED_SAMPLING_PREFIXES = (
     "claude-haiku-5-5",
 )
 _GOOGLE_MODELS = [
+    "gemini-3.5-flash",
+    "gemini-3.8-flash",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
     "gemini-2.5-flash",
     "gemini-3-pro",
     "gemini-3-flash",
     "gemini-3.1-pro-preview",
     "gemini-3.1-flash-lite-preview",
-    "gemini-3-flash-preview",
 ]
 _MINIMAX_MODELS = [
     "MiniMax-M3",
@@ -447,6 +452,17 @@ class CloudEngine(InferenceEngine):
         gemini_key = os.environ.get("GEMINI_API_KEY") or os.environ.get(
             "GOOGLE_API_KEY"
         )
+        if not gemini_key:
+            try:
+                from openjarvis.server.cloud_router import _load_keys
+
+                loaded = _load_keys()
+                gemini_key = loaded.get("GEMINI_API_KEY") or loaded.get("GOOGLE_API_KEY")
+                if gemini_key:
+                    os.environ.setdefault("GEMINI_API_KEY", gemini_key)
+                    os.environ.setdefault("GOOGLE_API_KEY", gemini_key)
+            except Exception:
+                pass
         if gemini_key:
             try:
                 from google import genai

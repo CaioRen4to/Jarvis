@@ -71,6 +71,7 @@ frontend/dist/
 # Desktop
 desktop/node_modules/
 desktop/dist/
+electron/node_modules/
 src/openjarvis/server/static/
 
 # Desktop (Tauri)

@@ -42,8 +42,8 @@ _VOICE_PREFIX_TO_LANG: Dict[str, str] = {
     "e": "e",  # Spanish
 }
 
-_DEFAULT_LANG_CODE = "a"
-_DEFAULT_VOICE_ID = "af_heart"
+_DEFAULT_LANG_CODE = "p"
+_DEFAULT_VOICE_ID = "pm_alex"
 _IMPORT_LOCK = threading.RLock()
 
 
@@ -132,13 +132,7 @@ class KokoroTTSBackend(TTSBackend):
 
     @staticmethod
     def _lang_for_voice(voice_id: str) -> str:
-        """Return the Kokoro ``lang_code`` for a voice ID.
-
-        Voice IDs follow the convention ``{lang}{gender}_{name}`` where
-        ``lang`` is a single letter prefix (e.g. ``z`` for Mandarin in
-        ``zf_xiaoxiao``). Falls back to American English if the prefix is
-        unknown.
-        """
+        """Return the Kokoro ``lang_code`` for a voice ID."""
         if not voice_id:
             return _DEFAULT_LANG_CODE
         return _VOICE_PREFIX_TO_LANG.get(voice_id[:1], _DEFAULT_LANG_CODE)
@@ -165,17 +159,8 @@ class KokoroTTSBackend(TTSBackend):
                     f"{kokoro._openjarvis_spacy_error}"
                 )
             try:
-                # KModel is language-blind and is by far the heaviest part of
-                # Kokoro. Reuse one model across every language pipeline.
                 pipeline = KPipeline(lang_code=lang_code, model=self._ensure_model())
             except ImportError as exc:
-                # Kokoro loads language-specific G2P resources at init time and
-                # several languages need extra dependencies that aren't pulled in
-                # by the base ``kokoro`` package. The known cases:
-                #   z (Mandarin) → misaki.zh (jieba / pypinyin / ordered-set)
-                #   j (Japanese) → misaki.ja (fugashi / unidic-lite)
-                # Translate the cryptic ``ordered_set``/``fugashi`` ImportError
-                # into a one-line install hint so the user isn't left guessing.
                 hints = {
                     "z": 'pip install "misaki[zh]"',
                     "j": 'pip install "misaki[ja]"',
@@ -209,8 +194,6 @@ class KokoroTTSBackend(TTSBackend):
 
         device = self._device
         if device == "auto":
-            # A real Kokoro install always brings torch. Keeping this fallback
-            # makes dependency probes and lightweight mocked tests graceful.
             try:
                 import torch
             except ImportError:
@@ -241,7 +224,7 @@ class KokoroTTSBackend(TTSBackend):
         if callable(close):
             try:
                 close()
-            except Exception:  # pragma: no cover - third-party cleanup is best effort
+            except Exception:  # pragma: no cover
                 pass
 
     def close(self) -> None:
@@ -294,11 +277,11 @@ class KokoroTTSBackend(TTSBackend):
         )
 
     def available_voices(self) -> List[str]:
-        # Curated subset of Kokoro v1.x voices. The full catalog is larger;
-        # the list here covers the languages OpenJarvis users most commonly
-        # ask for and avoids voice IDs that have changed across Kokoro
-        # releases.
         return [
+            # Brazilian Portuguese
+            "pm_alex",
+            "pm_santa",
+            "pf_dora",
             # American English
             "af_heart",
             "af_bella",
@@ -328,10 +311,6 @@ class KokoroTTSBackend(TTSBackend):
         ]
 
     def health(self) -> bool:
-        # Check the shared model, not the English pipeline: language-specific
-        # G2P problems surface at synthesis time for the voice actually used.
-        # Use the same lock as synthesis so concurrent health probes cannot
-        # allocate duplicate model weights or race with close().
         with self._pipeline_lock:
             try:
                 self._ensure_model()
